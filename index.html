@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
+  <meta name="mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-capable" content="yes"/>
+  <meta name="theme-color" content="#060810"/>
+  <title>YolSinyali</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://cdn.socket.io/4.7.4/socket.io.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body { margin:0; padding:0; height:100%; width:100%; overflow:hidden;
+      background:#060810; font-family:-apple-system,'Segoe UI',sans-serif; }
+
+    /* Harita en altta, sabit boyutlu stacking context */
+    #map { position:fixed; inset:0; z-index:1; }
+
+    /* Leaflet'in kendi pane'leri UI'nin üstüne çıkmasın diye tavan koyuyoruz */
+    .leaflet-pane, .leaflet-top, .leaflet-bottom { z-index: 2 !important; }
+    .leaflet-control-zoom { margin-right:12px!important; margin-bottom:150px!important; }
+
+    .leaflet-popup-content-wrapper {
+      background:rgba(15,23,42,0.96); color:#e2e8f0;
+      border:1px solid rgba(59,130,246,0.3); border-radius:14px; backdrop-filter:blur(12px);
+    }
+    .leaflet-popup-tip { background:rgba(15,23,42,0.96); }
+    .leaflet-control-attribution { background:rgba(6,8,16,0.7)!important; color:#374151!important; font-size:10px!important; }
+    .leaflet-control-zoom a {
+      background:rgba(15,23,42,0.9)!important; color:#93c5fd!important;
+      border-color:rgba(59,130,246,0.25)!important;
+      width:36px!important; height:36px!important; line-height:36px!important;
+      font-size:18px!important; border-radius:10px!important;
+    }
+
+    .glass {
+      background:rgba(10,18,36,0.92);
+      backdrop-filter:blur(16px); -webkit-backdrop-filter:blur(16px);
+      border:1px solid rgba(59,130,246,0.2);
+    }
+
+    /* ══ KRİTİK FIX: Tüm UI elemanları kendi bağımsız stacking context'inde,
+       isolation:isolate ile Leaflet'in olay yakalamasından tamamen izole ══ */
+    .ui-fixed {
+      position: fixed;
+      isolation: isolate;
+      z-index: 10000;
+    }
+
+    #login-screen {
+      inset:0; z-index:20000;
+      background:linear-gradient(160deg,#060810,#0c1628,#060810);
+      display:flex; align-items:center; justify-content:center; padding:16px;
+    }
+    #login-screen.hidden { display:none !important; }
+
+    #topbar {
+      top:8px; left:8px; right:8px;
+      height:52px; border-radius:16px;
+      display:none; align-items:center; padding:0 14px; gap:8px;
+    }
+
+    #statsbar {
+      top:68px; left:8px; right:8px;
+      border-radius:14px;
+      display:none; align-items:center; justify-content:space-around;
+      padding:10px 14px;
+    }
+
+    .panel {
+      border-radius:16px;
+      overflow-y:auto; overflow-x:hidden;
+      display:none;
+    }
+    @media (min-width:768px) {
+      #radar-panel     { top:120px; right:8px; width:280px; max-height:calc(100vh - 200px); }
+      #territory-panel { top:120px; left:8px;  width:280px; max-height:calc(100vh - 200px); }
+    }
+    @media (max-width:767px) {
+      #radar-panel, #territory-panel { top:120px; left:8px; right:8px; max-height:50vh; }
+    }
+
+    #bottombar {
+      bottom:8px; left:8px; right:8px;
+      height:60px; border-radius:16px;
+      display:none; align-items:center; padding:0 8px;
+    }
+
+    #alarm-banner { top:68px; left:8px; right:8px; display:none; }
+
+    #toast {
+      bottom:78px; left:50%; transform:translateX(-50%);
+      pointer-events:none; opacity:0; transition:opacity .3s;
+      max-width:88vw; text-align:center;
+    }
+    #toast.show { opacity:1; }
+
+    #territory-modal {
+      inset:0; z-index:30000;
+      display:none; align-items:flex-end; justify-content:center;
+      background:rgba(0,0,0,0.65); backdrop-filter:blur(8px);
+      padding:16px;
+    }
+    #territory-modal.open { display:flex; }
+
+    input[type="text"], input[type="url"] {
+      background:rgba(15,25,45,0.95);
+      border:1px solid rgba(59,130,246,0.25);
+      color:#e2e8f0; outline:none;
+      -webkit-appearance:none; appearance:none;
+      transition:border-color .2s;
+    }
+    input:focus { border-color:rgba(59,130,246,0.7); }
+    input::placeholder { color:#475569; }
+
+    @keyframes ripple { 0%{transform:scale(1);opacity:.8} 100%{transform:scale(3.5);opacity:0} }
+    @keyframes pulse-dot { 0%,100%{transform:scale(1)} 50%{transform:scale(1.2)} }
+    @keyframes alarm-flash { 0%,100%{box-shadow:0 0 0 0 rgba(239,68,68,0)} 50%{box-shadow:0 0 20px 8px rgba(239,68,68,.5)} }
+    @keyframes count-pop { 0%{transform:scale(1)} 50%{transform:scale(1.25)} 100%{transform:scale(1)} }
+    .pulse-dot { animation:pulse-dot 1.5s ease-in-out infinite; }
+    .alarm-box { animation:alarm-flash .8s ease-in-out infinite; }
+    .count-pop { animation:count-pop .3s ease; }
+
+    .no-scroll::-webkit-scrollbar { display:none; }
+    .no-scroll { -ms-overflow-style:none; scrollbar-width:none; }
+
+    /* Native buton davranışı garanti — tüm butonlar */
+    button {
+      cursor:pointer; touch-action:manipulation;
+      -webkit-tap-highlight-color:transparent;
+      position: relative; z-index: 1;
+    }
+    button:active { opacity:.72; }
+
+    .icon-btn {
+      width:40px; height:40px; border-radius:12px; border:none; background:transparent;
+      display:flex; align-items:center; justify-content:center;
+      transition:background .15s;
+    }
+    .icon-btn:hover { background:rgba(255,255,255,0.08); }
+
+    .bar-div { width:1px; height:28px; background:rgba(148,163,184,0.15); flex-shrink:0; }
+
+    #territory-status { display:none; }
+
+    .stat-item { text-align:center; }
+    .stat-value { font-size:15px; font-weight:700; color:#fff; }
+    .stat-label { font-size:10px; color:#64748b; text-transform:uppercase; letter-spacing:.05em; margin-top:1px; }
+  </style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<!-- ══ Login ══ -->
+<div id="login-screen" class="ui-fixed">
+  <div class="glass rounded-3xl p-8 w-full max-w-sm shadow-2xl">
+    <div class="flex flex-col items-center mb-6">
+      <div class="w-16 h-16 rounded-2xl bg-gradient-to-br from-blue-500 to-blue-700 flex items-center justify-center mb-4 shadow-lg">
+        <svg class="w-9 h-9 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+            d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"/>
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+            d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"/>
+        </svg>
+      </div>
+      <h1 class="text-2xl font-bold text-white">YolSinyali</h1>
+      <p class="text-slate-400 text-sm mt-1">Canlı Konum &amp; Bölge Sistemi</p>
+    </div>
+    <div class="space-y-4">
+      <div>
+        <label class="block text-slate-400 text-xs font-semibold mb-1.5 uppercase tracking-widest">Kullanıcı Adı</label>
+        <input id="login-username" type="text" placeholder="Adınızı girin"
+          class="w-full rounded-xl px-4 py-3.5 text-sm" autocomplete="off" autocorrect="off" autocapitalize="off"/>
+      </div>
+      <div>
+        <label class="block text-slate-400 text-xs font-semibold mb-1.5 uppercase tracking-widest">Sunucu URL</label>
+        <input id="login-server-url" type="url" placeholder="https://yolsinyali-xxxx.onrender.com"
+          class="w-full rounded-xl px-4 py-3.5 text-sm font-mono" autocorrect="off" autocapitalize="off"/>
+      </div>
+      <button id="login-btn" type="button"
+        class="w-full bg-blue-600 hover:bg-blue-500 text-white font-semibold py-3.5 rounded-xl text-sm shadow-lg shadow-blue-900/40">
+        Başla &amp; Konumu Paylaş 🚀
+      </button>
+    </div>
+    <p class="text-slate-600 text-xs text-center mt-5">GPS konumunuz şifreli paylaşılır</p>
+  </div>
+</div>
+
+<!-- ══ Top Bar ══ -->
+<div id="topbar" class="ui-fixed glass">
+  <div class="flex items-center gap-2 flex-1 min-w-0">
+    <div class="w-2 h-2 rounded-full bg-emerald-400 pulse-dot flex-shrink-0"></div>
+    <span class="text-white font-semibold text-sm truncate" id="topbar-username">—</span>
+    <span class="text-slate-500 text-xs flex-shrink-0" id="online-count">0 kişi</span>
+  </div>
+  <div class="flex items-center gap-1">
+    <button type="button" id="btn-toggle-radar" class="icon-btn text-blue-400" title="Radar">
+      <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="3" stroke-width="2"/>
+        <path stroke-linecap="round" stroke-width="2"
+          d="M5.6 5.6a9 9 0 0 0 0 12.8M18.4 5.6a9 9 0 0 1 0 12.8M8.5 8.5a5 5 0 0 0 0 7M15.5 8.5a5 5 0 0 1 0 7"/>
+      </svg>
+    </button>
+    <button type="button" id="btn-toggle-territory" class="icon-btn text-purple-400" title="Bölgeler">
+      <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+          d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7"/>
+      </svg>
+    </button>
+    <button type="button" id="btn-sos-top"
+      class="bg-green-600 hover:bg-green-500 text-white text-xs font-bold px-3 py-1.5 rounded-lg border-0 ml-1">
+      SOS
+    </button>
+  </div>
+</div>
+
+<!-- ══ İstatistik Şeridi ══ -->
+<div id="statsbar" class="ui-fixed glass">
+  <div class="stat-item">
+    <div class="stat-value" id="stat-steps">0</div>
+    <div class="stat-label">Adım</div>
+  </div>
+  <div class="w-px h-8 bg-slate-700"></div>
+  <div class="stat-item">
+    <div class="stat-value text-emerald-400" id="stat-gained">0 m²</div>
+    <div class="stat-label">Kazanılan</div>
+  </div>
+  <div class="w-px h-8 bg-slate-700"></div>
+  <div class="stat-item">
+    <div class="stat-value text-red-400" id="stat-lost">0 m²</div>
+    <div class="stat-label">Kaybedilen</div>
+  </div>
+  <div class="w-px h-8 bg-slate-700"></div>
+  <div class="stat-item">
+    <div class="stat-value text-blue-400" id="stat-distance">0 m</div>
+    <div class="stat-label">Toplam Yol</div>
+  </div>
+</div>
+
+<!-- ══ Radar Paneli ══ -->
+<div id="radar-panel" class="ui-fixed panel glass p-4 no-scroll">
+  <div class="flex items-center justify-between mb-3">
+    <h2 class="text-white font-bold text-sm flex items-center gap-2">
+      <span class="w-2 h-2 rounded-full bg-blue-400 inline-block"></span> Radar Listesi
+    </h2>
+    <button type="button" id="btn-close-radar"
+      class="text-slate-500 hover:text-white border-0 bg-transparent text-xl w-8 h-8 flex items-center justify-center rounded-lg hover:bg-white/10">×</button>
+  </div>
+  <div class="flex gap-2 mb-3">
+    <input id="friend-input" type="text" placeholder="Kullanıcı adı"
+      class="flex-1 rounded-xl px-3 py-2.5 text-sm" autocomplete="off"/>
+    <button type="button" id="btn-add-friend"
+      class="bg-blue-600 hover:bg-blue-500 text-white text-sm px-4 rounded-xl font-semibold border-0">Ekle</button>
+  </div>
+  <div class="mb-4">
+    <div class="flex justify-between mb-1.5">
+      <span class="text-slate-400 text-xs">Yakınlık Alarmı</span>
+      <span id="alarm-label" class="text-blue-400 text-xs font-medium">500 m</span>
+    </div>
+    <input id="alarm-distance" type="range" min="100" max="5000" value="500" step="100" class="w-full accent-blue-500"/>
+  </div>
+  <div id="friend-list" class="space-y-1.5">
+    <p class="text-slate-500 text-xs text-center py-3">Henüz takip edilen yok.</p>
+  </div>
+</div>
+
+<!-- ══ Bölge Paneli ══ -->
+<div id="territory-panel" class="ui-fixed panel glass p-4 no-scroll">
+  <div class="flex items-center justify-between mb-1">
+    <h2 class="text-white font-bold text-sm flex items-center gap-2">
+      <span class="text-purple-400">⬡</span> Bölge Sistemi
+    </h2>
+    <button type="button" id="btn-close-territory"
+      class="text-slate-500 hover:text-white border-0 bg-transparent text-xl w-8 h-8 flex items-center justify-center rounded-lg hover:bg-white/10">×</button>
+  </div>
+  <p class="text-slate-500 text-xs mb-3 leading-relaxed">
+    Yürüyerek bölge çiz, başlangıca 30m'ye gelince otomatik kapanır.<br>
+    Rakip bölgesinin <span class="text-slate-300 font-medium">merkezine</span> git → ele geçir!
+  </p>
+
+  <button type="button" id="territory-btn"
+    class="w-full text-white text-sm font-semibold py-3 rounded-xl border-0 mb-3" style="background:#7c3aed;">
+    🗺 Bölge Çizmeye Başla
+  </button>
+
+  <div id="territory-status" class="rounded-xl p-3 mb-3 text-xs space-y-1.5"
+    style="background:rgba(88,28,135,0.25);border:1px solid rgba(139,92,246,0.2);">
+    <div class="flex justify-between"><span class="text-slate-400">Nokta</span><span class="text-white font-medium" id="territory-points">0</span></div>
+    <div class="flex justify-between"><span class="text-slate-400">Mesafe</span><span class="text-white font-medium" id="territory-dist">0 m</span></div>
+    <div class="flex justify-between"><span class="text-slate-400">Başlangıca</span><span class="text-emerald-400 font-medium" id="dist-to-start">—</span></div>
+    <div class="text-slate-600 text-xs pt-1 border-t border-slate-700">30m içine gir → otomatik kapanır ✓</div>
+  </div>
+
+  <!-- Genel istatistik özeti -->
+  <div class="rounded-xl p-3 mb-3 text-xs space-y-1.5" style="background:rgba(15,25,45,0.6);border:1px solid rgba(59,130,246,0.15);">
+    <p class="text-slate-500 font-semibold uppercase tracking-widest mb-1" style="font-size:10px;">Genel Özet</p>
+    <div class="flex justify-between"><span class="text-slate-400">Toplam adım</span><span class="text-white font-medium" id="summary-steps">0</span></div>
+    <div class="flex justify-between"><span class="text-slate-400">Toplam kazanılan</span><span class="text-emerald-400 font-medium" id="summary-gained">0 m²</span></div>
+    <div class="flex justify-between"><span class="text-slate-400">Toplam kaybedilen</span><span class="text-red-400 font-medium" id="summary-lost">0 m²</span></div>
+    <div class="flex justify-between"><span class="text-slate-400">Net alan</span><span class="text-blue-400 font-medium" id="summary-net">0 m²</span></div>
+  </div>
+
+  <p class="text-slate-500 text-xs font-semibold uppercase tracking-widest mb-2">Bölgelerim</p>
+  <div id="territory-list" class="space-y-1.5">
+    <p class="text-slate-600 text-xs text-center py-3">Henüz bölgen yok.</p>
+  </div>
+</div>
+
+<!-- ══ Bottom Bar ══ -->
+<div id="bottombar" class="ui-fixed glass">
+  <button type="button" id="btn-center-me"
+    class="flex-1 flex items-center justify-center gap-2 text-white text-sm font-medium py-2 rounded-xl border-0 bg-transparent hover:bg-white/5">
+    <svg class="w-4 h-4 text-blue-400 flex-shrink-0" fill="currentColor" viewBox="0 0 24 24">
+      <path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm1 17.93V18a1 1 0 0 0-2 0v1.93A8 8 0 0 1 4.07 13H6a1 1 0 0 0 0-2H4.07A8 8 0 0 1 11 4.07V6a1 1 0 0 0 2 0V4.07A8 8 0 0 1 19.93 11H18a1 1 0 0 0 0 2h1.93A8 8 0 0 1 13 19.93z"/>
+    </svg>
+    <span class="hidden sm:inline">Konumuma Git</span><span class="sm:hidden">Git</span>
+  </button>
+  <div class="bar-div"></div>
+  <button type="button" id="btn-toggle-territory-bottom"
+    class="flex-1 flex items-center justify-center gap-2 text-white text-sm font-medium py-2 rounded-xl border-0 bg-transparent hover:bg-white/5">
+    <span class="text-purple-400 text-lg leading-none">⬡</span>
+    <span class="hidden sm:inline">Bölge Çiz</span><span class="sm:hidden">Bölge</span>
+  </button>
+  <div class="bar-div"></div>
+  <button type="button" id="btn-sos-bottom"
+    class="flex-1 flex items-center justify-center gap-2 text-white text-sm font-medium py-2 rounded-xl border-0 bg-transparent hover:bg-green-900/20">
+    <svg class="w-4 h-4 text-green-400 flex-shrink-0" fill="currentColor" viewBox="0 0 24 24">
+      <path d="M12.04 2C6.58 2 2.13 6.45 2.13 11.91c0 1.75.46 3.45 1.32 4.95L2.05 22l5.25-1.38c1.45.79 3.08 1.21 4.74 1.21 5.46 0 9.91-4.45 9.91-9.91 0-2.65-1.03-5.14-2.9-7.01A9.816 9.816 0 0 0 12.04 2zm4.96 13.44c-.2.56-1.16 1.08-1.6 1.14-.4.06-.91.09-1.47-.09-.34-.11-.78-.26-1.33-.51-2.33-1.01-3.85-3.37-3.97-3.53-.11-.16-.93-1.24-.93-2.36 0-1.12.59-1.67.8-1.9.21-.23.46-.29.61-.29l.44.01c.14 0 .33-.05.52.4.19.45.65 1.59.71 1.71.06.11.1.25.02.4-.08.15-.12.24-.24.37-.12.13-.25.28-.36.38-.12.11-.24.23-.1.45.14.22.62.97 1.34 1.57.92.78 1.7 1.02 1.93 1.13.24.12.38.1.52-.06.14-.16.6-.7.76-.94.16-.24.32-.2.54-.12.22.08 1.4.66 1.64.78.24.12.4.18.46.28.06.1.06.58-.14 1.14z"/>
+    </svg>
+    <span class="hidden sm:inline">WhatsApp SOS</span><span class="sm:hidden">SOS</span>
+  </button>
+</div>
+
+<!-- ══ Alarm Banner ══ -->
+<div id="alarm-banner" class="ui-fixed">
+  <div class="glass rounded-2xl p-4 text-center alarm-box">
+    <p class="text-red-400 font-bold text-sm" id="alarm-text">⚠️ Arkadaşın yakında!</p>
+    <button type="button" id="btn-dismiss-alarm"
+      class="text-slate-500 text-xs mt-1.5 hover:text-slate-300 border-0 bg-transparent">Kapat</button>
+  </div>
+</div>
+
+<!-- ══ Toast ══ -->
+<div id="toast" class="ui-fixed glass rounded-2xl px-5 py-3 text-white text-sm font-medium shadow-xl"></div>
+
+<!-- ══ Bölge Adlandırma Modali ══ -->
+<div id="territory-modal" class="ui-fixed">
+  <div class="glass rounded-3xl p-6 shadow-2xl w-full" style="max-width:420px;">
+    <div class="text-center mb-5">
+      <div class="text-3xl mb-2">🗺</div>
+      <h3 class="text-white font-bold text-lg">Bölge Tamamlandı!</h3>
+      <p class="text-slate-400 text-sm mt-1">Bölgeye bir isim ver</p>
+    </div>
+    <input id="territory-name-input" type="text" placeholder="ör: Mahallemiz, Futbol Sahası..."
+      class="w-full rounded-xl px-4 py-3.5 text-sm mb-4" autocomplete="off"/>
+    <div class="flex gap-3">
+      <button type="button" id="btn-cancel-territory"
+        class="flex-1 text-white py-3 rounded-xl text-sm border-0" style="background:#334155;">İptal</button>
+      <button type="button" id="btn-save-territory"
+        class="flex-1 text-white py-3 rounded-xl text-sm font-semibold border-0" style="background:#7c3aed;">Kaydet ✓</button>
+    </div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
